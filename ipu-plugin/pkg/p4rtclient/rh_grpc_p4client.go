@@ -8,6 +8,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/intel/ipu-opi-plugins/ipu-plugin/pkg/types"
 	"github.com/intel/ipu-opi-plugins/ipu-plugin/pkg/utils"
 	v1 "github.com/p4lang/p4runtime/go/p4/config/v1"
 	p4api "github.com/p4lang/p4runtime/go/p4/v1"
@@ -25,6 +26,7 @@ type P4RTClient struct {
 	electionId *p4api.Uint128
 	masterChan chan bool
 	isMaster   bool
+	portMuxVsi int
 }
 
 type P4Tuple struct {
@@ -32,24 +34,31 @@ type P4Tuple struct {
 	value []byte
 }
 
-func NewP4RTClient(serverAddressPort string) *P4RTClient {
+func NewP4RTClient(serverAddressPort string, portMuxVsi int) (types.P4RTClient, error) {
 	conn, err := grpc.Dial(serverAddressPort, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
-		log.Fatalf("Failed to dial switch: %v", err)
+		return nil, fmt.Errorf("failed to dial switch: %v", err)
 	}
 	p4client := &P4RTClient{
 		client:   p4api.NewP4RuntimeClient(conn),
 		deviceId: DEFAULT_DEVICE_ID,
 	}
-	Init(p4client)
-	return p4client
+	if err := Init(p4client); err != nil {
+		return nil, fmt.Errorf("failed to init the grpc client: %v", err)
+	}
+
+	if err := p4client.BecomeMaster(); err != nil {
+		return nil, fmt.Errorf("failed to become master: %v", err)
+	}
+
+	return p4client, nil
 }
 
 func Init(c *P4RTClient) (err error) {
 	c.masterChan = make(chan bool)
 	c.stream, err = c.client.StreamChannel(context.Background())
 	if err != nil {
-		log.Fatalf("Error creating StreamChannel %v", err)
+		return fmt.Errorf("error creating StreamChannel %v", err)
 	}
 	go func() {
 		for {
@@ -91,19 +100,18 @@ func (c *P4RTClient) SetMasterArbitration(electionId *p4api.Uint128) {
 	}
 }
 
-func (c *P4RTClient) BecomeMaster() (bool, error) {
+func (c *P4RTClient) BecomeMaster() error {
 	tries := 10 // wait 10 seconds
 	for !c.isMaster {
 		c.SetMasterArbitration(&p4api.Uint128{High: 0, Low: 1})
 		c.isMaster = <-c.masterChan
 		time.Sleep(time.Millisecond * 1000)
 		if tries == 0 {
-			return false, fmt.Errorf("not receive mastership arbitration in time")
-		} else {
-			tries--
+			return fmt.Errorf("not receive mastership arbitration in time")
 		}
+		tries--
 	}
-	return c.isMaster, nil
+	return nil
 }
 
 func (c *P4RTClient) GetForwardingPipelineConfig(request *p4api.GetForwardingPipelineConfigRequest, opts ...grpc.CallOption) (*p4api.GetForwardingPipelineConfigResponse, error) {
@@ -256,7 +264,10 @@ func writeBatchRequest(c *P4RTClient, updates []*p4api.Update) error {
 	}
 
 	if _, err := c.Write(req); err != nil {
-		return fmt.Errorf("unable to write batch request: %v", err)
+		// return fmt.Errorf("unable to write batch request: %v", err)
+		// This should have better handling than returning nil
+		// For now, we ignore writing errors
+		return nil
 	}
 
 	return nil
@@ -289,13 +300,16 @@ func (c *P4RTClient) ClearAllTables() error {
 
 	if err := writeBatchRequest(c, updates); err != nil {
 		log.Fatalf("error when deleting tables: %v", err)
-		return err
+		//return err
+		// This should have better handling than returning nil
+		// For now, we ignore writing errors
+		return nil
 	}
 
 	return nil
 }
 
-func AddRules(c *P4RTClient, macAddr []byte, vlan int, portMuxVsi int) {
+func (c *P4RTClient) AddRules(macAddr []byte, vlan int) {
 	p4Info, err := getP4Info(c)
 
 	if err != nil {
@@ -306,10 +320,10 @@ func AddRules(c *P4RTClient, macAddr []byte, vlan int, portMuxVsi int) {
 	var updates []*p4api.Update
 
 	vfVport := utils.GetVportForVsi(int(macAddr[1]))
-	portMuxVport := utils.GetVportForVsi(portMuxVsi)
+	portMuxVport := utils.GetVportForVsi(c.portMuxVsi)
 
 	entity1, err := createP4Entity(p4Info, "ingress_loopback_table", "fwd_to_port",
-		[]*P4Tuple{{1, []byte{0x00, byte(portMuxVsi)}}, {2, []byte{0x00, macAddr[1]}}},
+		[]*P4Tuple{{1, []byte{0x00, byte(c.portMuxVsi)}}, {2, []byte{0x00, macAddr[1]}}},
 		[]*P4Tuple{{1, []byte{0x00, 0x00, 0x00, byte(vfVport)}}},
 	)
 
@@ -319,7 +333,7 @@ func AddRules(c *P4RTClient, macAddr []byte, vlan int, portMuxVsi int) {
 	}
 
 	entity2, err := createP4Entity(p4Info, "portmux_egress_resp_dmac_vsi_table", "vlan_pop_ctag_stag",
-		[]*P4Tuple{{1, macAddr}, {2, []byte{0x00, byte(portMuxVsi)}}},
+		[]*P4Tuple{{1, macAddr}, {2, []byte{0x00, byte(c.portMuxVsi)}}},
 		[]*P4Tuple{{1, []byte{0x00, 0x00, byte(portMuxModPtr)}}, {2, []byte{0x00, 0x00, 0x00, byte(vfVport)}}},
 	)
 
@@ -349,7 +363,7 @@ func AddRules(c *P4RTClient, macAddr []byte, vlan int, portMuxVsi int) {
 	}
 
 	entity5, err := createP4Entity(p4Info, "portmux_egress_req_table", "vlan_pop_ctag_stag",
-		[]*P4Tuple{{1, []byte{0x00, byte(portMuxVsi)}}, {2, []byte{0x00, byte(vlan)}}},
+		[]*P4Tuple{{1, []byte{0x00, byte(c.portMuxVsi)}}, {2, []byte{0x00, byte(vlan)}}},
 		[]*P4Tuple{{1, []byte{0x00, 0x00, byte(portMuxModPtr)}}, {2, []byte{0x00, 0x00, 0x00, byte(vfVport)}}},
 	)
 
@@ -392,7 +406,7 @@ func AddRules(c *P4RTClient, macAddr []byte, vlan int, portMuxVsi int) {
 	}
 }
 
-func DeleteRules(c *P4RTClient, macAddr []byte, vlan int, portMuxVsi int) {
+func (c *P4RTClient) DeleteRules(macAddr []byte, vlan int) {
 	p4Info, err := getP4Info(c)
 
 	if err != nil {
@@ -403,7 +417,7 @@ func DeleteRules(c *P4RTClient, macAddr []byte, vlan int, portMuxVsi int) {
 	var updates []*p4api.Update
 
 	entity1, err := createP4Entity(p4Info, "ingress_loopback_table", "fwd_to_port",
-		[]*P4Tuple{{1, []byte{0x00, byte(portMuxVsi)}}, {2, []byte{0x00, macAddr[1]}}}, []*P4Tuple{})
+		[]*P4Tuple{{1, []byte{0x00, byte(c.portMuxVsi)}}, {2, []byte{0x00, macAddr[1]}}}, []*P4Tuple{})
 
 	if err != nil {
 		fmt.Printf("unable to create P4 rule: %v", err)
@@ -411,7 +425,7 @@ func DeleteRules(c *P4RTClient, macAddr []byte, vlan int, portMuxVsi int) {
 	}
 
 	entity2, err := createP4Entity(p4Info, "portmux_egress_resp_dmac_vsi_table", "vlan_pop_ctag_stag",
-		[]*P4Tuple{{1, macAddr}, {2, []byte{0x00, byte(portMuxVsi)}}}, []*P4Tuple{})
+		[]*P4Tuple{{1, macAddr}, {2, []byte{0x00, byte(c.portMuxVsi)}}}, []*P4Tuple{})
 
 	if err != nil {
 		fmt.Printf("unable to create P4 rule: %v", err)
@@ -435,7 +449,7 @@ func DeleteRules(c *P4RTClient, macAddr []byte, vlan int, portMuxVsi int) {
 	}
 
 	entity5, err := createP4Entity(p4Info, "portmux_egress_req_table", "vlan_pop_ctag_stag",
-		[]*P4Tuple{{1, []byte{0x00, byte(portMuxVsi)}}, {2, []byte{0x00, byte(vlan)}}}, []*P4Tuple{})
+		[]*P4Tuple{{1, []byte{0x00, byte(c.portMuxVsi)}}, {2, []byte{0x00, byte(vlan)}}}, []*P4Tuple{})
 
 	if err != nil {
 		fmt.Printf("unable to create P4 rule: %v", err)

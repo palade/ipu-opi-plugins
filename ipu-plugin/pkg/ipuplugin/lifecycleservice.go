@@ -43,6 +43,8 @@ type LifeCycleServiceServer struct {
 	daemonPort   int
 	mode         string
 	p4rtbin      string
+	p4rtAddress  string
+	portMux      int
 }
 
 const (
@@ -53,13 +55,15 @@ const (
 	imcAddress  = "192.168.0.1:22"
 )
 
-func NewLifeCycleService(daemonHostIp, daemonIpuIp string, daemonPort int, mode string, p4rtbin string) *LifeCycleServiceServer {
+func NewLifeCycleService(daemonHostIp, daemonIpuIp string, daemonPort int, mode string, p4rtbin string, p4rtAddress string, portMux int) *LifeCycleServiceServer {
 	return &LifeCycleServiceServer{
 		daemonHostIp: daemonHostIp,
 		daemonIpuIp:  daemonIpuIp,
 		daemonPort:   daemonPort,
 		mode:         mode,
 		p4rtbin:      p4rtbin,
+		p4rtAddress:  p4rtAddress,
+		portMux:      portMux,
 	}
 }
 
@@ -479,21 +483,21 @@ func (e *ExecutableHandlerImpl) validate() bool {
 }
 
 func (s *LifeCycleServiceServer) Init(ctx context.Context, in *pb.InitRequest) (*pb.IpPort, error) {
-	initHandlers()
+	//initHandlers()
 
 	if in.DpuMode && s.mode != types.IpuMode || !in.DpuMode && s.mode != types.HostMode {
 		return nil, status.Errorf(codes.Internal, "Ipu plugin running in %s mode", s.mode)
 	}
 
 	if in.DpuMode {
-		if val := executableHandler.validate(); !val {
-			log.Info("forcing state")
-			if err := sshHander.sshFunc(); err != nil {
-				return nil, fmt.Errorf("error calling sshFunc %s", err)
-			}
-		} else {
-			log.Info("not forcing state")
-		}
+		// if val := executableHandler.validate(); !val {
+		// 	log.Info("forcing state")
+		// 	if err := sshHander.sshFunc(); err != nil {
+		// 		return nil, fmt.Errorf("error calling sshFunc %s", err)
+		// 	}
+		// } else {
+		// 	log.Info("not forcing state")
+		// }
 
 		vfMacList, err := utils.GetVfMacList()
 
@@ -506,13 +510,24 @@ func (s *LifeCycleServiceServer) Init(ctx context.Context, in *pb.InitRequest) (
 		}
 
 		// Preconfigure the FXP with point-to-point rules between host VFs
-		p4rtclient.DeletePointToPointVFRules(s.p4rtbin, vfMacList)
-		p4rtclient.CreatePointToPointVFRules(s.p4rtbin, vfMacList)
+		client, err := p4rtclient.NewP4RTClient(s.p4rtAddress, s.portMux)
+
+		if err == nil {
+			log.Info("proceeding with grpc RH P4 runtime client")
+
+			client.(*p4rtclient.P4RTClient).DeletePointToPointVFRules(vfMacList)
+			client.(*p4rtclient.P4RTClient).CreatePointToPointVFRules(vfMacList)
+		} else {
+			log.Info("proceeding with binary Rh P4 runtime client")
+
+			p4rtclient.DeletePointToPointVFRules(s.p4rtbin, vfMacList)
+			p4rtclient.CreatePointToPointVFRules(s.p4rtbin, vfMacList)
+		}
 	}
 
-	if err := configureChannel(s.mode, s.daemonHostIp, s.daemonIpuIp); err != nil {
-		return nil, status.Error(codes.Internal, err.Error())
-	}
+	// if err := configureChannel(s.mode, s.daemonHostIp, s.daemonIpuIp); err != nil {
+	// 	return nil, status.Error(codes.Internal, err.Error())
+	// }
 
 	response := &pb.IpPort{Ip: s.daemonIpuIp, Port: int32(s.daemonPort)}
 

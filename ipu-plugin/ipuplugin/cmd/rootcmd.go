@@ -48,6 +48,7 @@ const (
 	defaultDaemonHostIp = "192.168.1.1"
 	defaultDaemonIpuIp  = "192.168.1.2"
 	defaultDaemonPort   = 50151
+	defaultInfrap4dAddr = "127.0.0.0:9559"
 )
 
 var (
@@ -69,6 +70,7 @@ var (
 		daemonHostIp  string
 		daemonIpuIp   string
 		daemonPort    int
+		infrap4dAddr  string
 	}
 
 	rootCmd = &cobra.Command{
@@ -98,6 +100,7 @@ var (
 			daemonHostIp := viper.GetString("daemonHostIp")
 			daemonIpuIp := viper.GetString("daemonIpuIp")
 			daemonPort := viper.GetInt("daemonPort")
+			infrap4dAddr := viper.GetString("infrap4dAddr")
 
 			log.Info("Initializing IPU plugin")
 			log.WithFields(log.Fields{
@@ -115,12 +118,13 @@ var (
 				"daemonHostIp": daemonHostIp,
 				"daemonIpuIp":  daemonIpuIp,
 				"daemonHost":   daemonPort,
+				"infrap4dAddr": infrap4dAddr,
 			}).Info("Configurations")
 
 			brCtlr, brType := getBridgeController(bridge, bridgeType, ovsCliDir)
 			p4Client := getP4Client(p4pkg, p4rtbin, portMuxVsi, defaultP4BridgeName, brType)
 
-			mgr := ipuplugin.NewIpuPlugin(port, brCtlr, p4rtbin, p4Client, servingAddr, servingProto, bridge, intf, ovsCliDir, mode, daemonHostIp, daemonIpuIp, daemonPort)
+			mgr := ipuplugin.NewIpuPlugin(port, brCtlr, p4rtbin, p4Client, servingAddr, servingProto, bridge, intf, ovsCliDir, mode, daemonHostIp, daemonIpuIp, daemonPort, infrap4dAddr, portMuxVsi)
 			if err := mgr.Run(); err != nil {
 				exitWithError(err, 4)
 			}
